@@ -5,9 +5,9 @@ module IMUCalib
 using OSC
 using DataFrames
 
-export collect_stationary
+export getrawdata
 
-function collect_stationary(duration::Real, oscport::Integer=9999)
+function getrawdata(duration::Real, oscport::Integer=9999)
     timestamps = Float64[]
     data = [Float32[] for _ in 1:9]
     oscpath = "/rawimu"
@@ -20,7 +20,6 @@ function collect_stationary(duration::Real, oscport::Integer=9999)
     println("Waiting for first message...")
     while true
         msg = OscMsg(recv(sock))
-        println("Got path: $(path(msg))")
         if path(msg) == oscpath
             break
         end
