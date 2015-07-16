@@ -9,7 +9,7 @@ export getrawdata
 
 function getrawdata(duration::Real, oscport::Integer=9999)
     timestamps = Float64[]
-    data = [Float32[] for _ in 1:9]
+    data = [Int32[] for _ in 1:9]
     oscpath = "/rawimu"
     sock = UdpSocket()
     if !bind(sock, ip"0.0.0.0", oscport)
@@ -39,6 +39,9 @@ function getrawdata(duration::Real, oscport::Integer=9999)
     end
     close(sock)
     makedf(timestamps, data)
+end
+
+function getbias(data)
 end
 
 function makedf(timestamps, data)
