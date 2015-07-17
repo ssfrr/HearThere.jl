@@ -5,8 +5,9 @@ module HearThere
 using OSC
 using DataFrames
 using PyPlot
+using Quaternions
 
-export getrawdata
+export getrawdata, getcookeddata
 
 # full-scale range in g's (based on 16-bit signed ADC word)
 const accelFSR = 16
@@ -35,7 +36,7 @@ function getrawdata(duration::Real, oscport::Integer=10001)
     sock = UdpSocket()
     if !bind(sock, ip"0.0.0.0", oscport)
         println("Couldn't bind to port $oscport")
-        return makedf(timestamps, data)
+        return makerawdf(timestamps, data)
     end
     try
         # wait for the first message
@@ -67,7 +68,87 @@ function getrawdata(duration::Real, oscport::Integer=10001)
     finally
         close(sock)
     end
-    makedf(timestamps, data)
+    makerawdf(timestamps, data)
+end
+
+"""
+Listen on the given port for OSC messages of the form:
+
+    /orientation ffff q0 q1 q2 q3
+and
+    /ranges ffff anchor0 anchor1 anchor2 anchor3
+
+and return a tuple of DataFrames of the timestamped values.
+"""
+function getcookeddata(duration::Real, oscport::Integer=10001)
+    orientationpath = "/orientation"
+    rangepath = "/ranges"
+    rangedf = DataFrame(
+        timestamp=Float64[],
+        anchor0=Float32[],
+        anchor1=Float32[],
+        anchor2=Float32[],
+        anchor3=Float32[])
+    orientationdf = DataFrame(
+        timestamp=Float64[],
+        q0=Float32[],
+        q1=Float32[],
+        q2=Float32[],
+        q3=Float32[])
+    sock = UdpSocket()
+    if !bind(sock, ip"0.0.0.0", oscport)
+        println("Couldn't bind to port $oscport")
+        return (rangedf, orientationdf)
+    end
+    try
+        # wait for the first message
+        println("Waiting for first message...")
+        while true
+            msg = OscMsg(recv(sock))
+            if path(msg) in [orientationpath, rangepath]
+                break
+            end
+        end
+        println("Capturing Data...")
+        starttime = time()
+        now = time()
+        lastreported = 0
+        while(now < starttime + duration)
+            if(now - lastreported >= 5)
+                println("$(round(starttime + duration - now)) seconds left")
+                lastreported = now
+            end
+            msg = OscMsg(recv(sock))
+            now = time()
+            if path(msg) == orientationpath
+                push!(orientationdf, [now, msg[1], msg[2], msg[3], msg[4]])
+            elseif path(msg) == rangepath
+                push!(rangedf, [now, msg[1], msg[2], msg[3], msg[4]])
+            end
+        end
+    finally
+        close(sock)
+    end
+    (rangedf, orientationdf)
+end
+
+function rotate(q::Quaternion, v::Vector)
+    q = normalize(q)
+
+    imag(q*Quaternion(v)*conj(q))
+end
+
+function plotorientation(data)
+    orientations = Quaternion{Float32}[Quaternion(d...) for d in zip(data[:q0], data[:q1], data[:q2], data[:q3])]
+    # this is probably really slow
+    path = hcat([rotate(o, Float32[0, 0, 1]) for o in orientations]...)
+    PyPlot.plot3D(vec(path[1, :]), vec(path[2, :]), vec(path[3, :]))
+    xlim([-1, 1])
+    ylim([-1, 1])
+    zlim([-1, 1])
+    xlabel("x")
+    ylabel("y")
+    zlabel("z")
 end
 
 """
@@ -179,7 +260,7 @@ end
 """
 Make a dataframe from the timestamps and collected data
 """
-function makedf(timestamps, data)
+function makerawdf(timestamps, data)
     DataFrame(
         timestamp=timestamps,
         accel_x=data[1],
