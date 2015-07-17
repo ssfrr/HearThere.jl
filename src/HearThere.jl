@@ -1,4 +1,4 @@
-module IMUCalib
+module HearThere
 
 # currently using my hacked version of OSC.jl to enable 1-based indexing and
 # the path method. PR has been filed

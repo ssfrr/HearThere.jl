@@ -1,6 +1,6 @@
-module IMUCalibTests
+module HearThereTests
 
-using IMUCalib
+using HearThere
 using DataFrame
 using Base.Test
 
