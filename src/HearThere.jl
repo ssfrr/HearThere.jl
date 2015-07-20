@@ -6,6 +6,8 @@ using OSC
 using DataFrames
 using PyPlot
 using Quaternions
+using LightXML
+using DataFramesMeta
 
 export getrawdata, getcookeddata
 
@@ -136,6 +138,13 @@ function rotate(q::Quaternion, v::Vector)
     q = normalize(q)
 
     imag(q*Quaternion(v)*conj(q))
+end
+
+function plotpath(data)
+    PyPlot.plot3D(data[:x], data[:y], data[:z])
+    xlabel("x")
+    ylabel("y")
+    zlabel("z")
 end
 
 function plotorientation(data)
@@ -273,5 +282,92 @@ function makerawdf(timestamps, data)
         mag_y=data[8],
         mag_z=data[9])
 end
+
+function parseoptitrack(filename)
+    bodies = Dict{Int, String}()
+    rootElement = root(parse_file(filename))
+    for bodyDesc in get_elements_by_tagname(rootElement, "RigidBodyDesc")
+        name = content(find_element(bodyDesc, "Name"))
+        id = int(content(find_element(bodyDesc, "ID")))
+        bodies[id] = name
+    end
+
+    df = DataFrame(
+        timestamp=Float64[],
+        id=Int[],
+        x=Float64[],
+        y=Float64[],
+        z=Float64[],
+        q0=Float64[],
+        q1=Float64[],
+        q2=Float64[],
+        q3=Float64[]
+    )
+    for dfElement in get_elements_by_tagname(rootElement, "DataFrame")
+        # the Latency field apparently means the capture computer's timestamp. See
+        # https://forums.naturalpoint.com/viewtopic.php?p=57338
+        timestamp = float(content(find_element(dfElement, "Latency")))
+        bodydataElement = find_element(dfElement, "RigidBodyData")
+        # the rigid body properties aren't contained inside an XML tag, they're all
+        # just repeated, so we iterate through the zipped list
+        for (id, x, y, z, q0, q1, q2, q3) in zip(
+                get_elements_by_tagname(bodydataElement, "RigidBodyID"),
+                get_elements_by_tagname(bodydataElement, "x"),
+                get_elements_by_tagname(bodydataElement, "y"),
+                get_elements_by_tagname(bodydataElement, "z"),
+                get_elements_by_tagname(bodydataElement, "qw"),
+                get_elements_by_tagname(bodydataElement, "qx"),
+                get_elements_by_tagname(bodydataElement, "qy"),
+                get_elements_by_tagname(bodydataElement, "qz"))
+            push!(df, [
+                timestamp,
+                int(content(id)),
+                float(content(x)),
+                float(content(y)),
+                float(content(z)),
+                float(content(q0)),
+                float(content(q1)),
+                float(content(q2)),
+                float(content(q3))])
+        end
+    end
+    # The OptiTrack reports a location of 0, 0, 0 if the trackable isn't present
+    @where df ((:x .!= 0) | (:y .!= 0) | (:z .!= 0))
+end
+
+function getanchorlocations(rangefile, locationfile)
+    anchorDF = DataFrame(
+        anchor=0:3,
+        x=zeros(4),
+        y=zeros(4),
+        z=zeros(4),
+    )
+
+    locdata = readtable(locationfile)
+    counts = zeros(Int, 4)
+    for (id, x, y, z) in zip(locdata[:anchor], locdata[:x], locdata[:y], locdata[:z])
+        # the values are doubled because the optitrack was calibrated incorrectly
+        # so all the reported values are half what they should be
+        anchorDF[id+1, :x] += 2x
+        anchorDF[id+1, :y] += 2y
+        anchorDF[id+1, :z] += 2z
+        counts[id+1] += 1
+    end
+
+    anchorDF[:x][3:4] = anchorDF[:x][3:4] ./ counts[3:4]
+    anchorDF[:y][3:4] = anchorDF[:y][3:4] ./ counts[3:4]
+    anchorDF[:z][3:4] = anchorDF[:z][3:4] ./ counts[3:4]
+
+    x2 = anchorDF[:x][3]
+    y2 = anchorDF[:y][3]
+    z2 = anchorDF[:z][3]
+
+    ranges = readtable(rangefile)
+    r20 = mean(dropna(ranges[:r20]))
+    r21 = mean(dropna(ranges[:r21]))
+    r30 = mean(dropna(ranges[:r30]))
+    r31 = mean(dropna(ranges[:r31]))
+
+    α = r30^2 - r20^2 + x2^2
 
 end # module
