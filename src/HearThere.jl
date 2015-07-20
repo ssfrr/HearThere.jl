@@ -319,12 +319,14 @@ function parseoptitrack(filename)
                 get_elements_by_tagname(bodydataElement, "qx"),
                 get_elements_by_tagname(bodydataElement, "qy"),
                 get_elements_by_tagname(bodydataElement, "qz"))
+            # the optitrack data is 1/2 what it should be because of a calibration
+            # error. Also the Z-axis is reversed
             push!(df, [
                 timestamp,
                 int(content(id)),
-                float(content(x)),
-                float(content(y)),
-                float(content(z)),
+                float(content(x)) * 2,
+                float(content(y)) * 2,
+                -float(content(z)) * 2,
                 float(content(q0)),
                 float(content(q1)),
                 float(content(q2)),
@@ -380,10 +382,10 @@ function getanchorlocations(rangefile, locationfile)
     for (id, x, y, z) in zip(locdata[:anchor], locdata[:x], locdata[:y], locdata[:z])
         # the values are doubled because the optitrack was calibrated incorrectly
         # so all the reported values are half what they should be. We also
-        # divide by 1000 to convert mm to m
+        # divide by 1000 to convert mm to m. Also the Z axis is reversed
         anchorDF[id+1, :x] += 2x / 1000
         anchorDF[id+1, :y] += 2y / 1000
-        anchorDF[id+1, :z] += 2z / 1000
+        anchorDF[id+1, :z] += -2z / 1000
         counts[id+1] += 1
     end
 
