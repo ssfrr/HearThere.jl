@@ -335,6 +335,38 @@ function parseoptitrack(filename)
     @where df ((:x .!= 0) | (:y .!= 0) | (:z .!= 0))
 end
 
+"""
+Takes 2 points (a1 and a2) and two ranges to those points (r1 and r2) and finds
+the 0, 1 or 2 points that satisfy the ranges. The are returned as a 2xN matrix,
+where N is the number of solutions.
+"""
+function trilaterate(a1, a2, r1, r2)
+    # we first solve in a coordinate system where a1 is at the origin
+    x2 = a2[1] - a1[1]
+    y2 = a2[2] - a1[2]
+
+    α = r1^2 - r2^2 + x2^2
+    a = 1 + x2^2/y2^2
+    b = -(α*x2+x2*y2^2)/y2^2
+    c = (α^2 + 2α*y2^2+y2^4)/4y2^2 - r1^2
+
+    det = b^2-4a*c
+    if det < 0
+        sol = Array(Float64, 2, 0)
+    elseif det == 0.0
+        x0 = -b/2a
+        y0 = (r1^2-r2^2+x2^2-2x2*x0+y2^2)/2y2
+        sol = [x0, y0]
+    else
+        # possibly 2 solutions to quadratic
+        x0 = [(-b + √det)/2a, (-b - √det)/2a]
+        y0 = (r1^2-r2^2+x2^2-2x2*x0+y2^2)/2y2
+        sol = vcat(x0', y0')
+    end
+    # now re-apply the offset. Note this will broadcast in the 2x2 case
+    sol .+ a1
+end
+
 function getanchorlocations(rangefile, locationfile)
     anchorDF = DataFrame(
         anchor=0:3,
@@ -347,10 +379,11 @@ function getanchorlocations(rangefile, locationfile)
     counts = zeros(Int, 4)
     for (id, x, y, z) in zip(locdata[:anchor], locdata[:x], locdata[:y], locdata[:z])
         # the values are doubled because the optitrack was calibrated incorrectly
-        # so all the reported values are half what they should be
-        anchorDF[id+1, :x] += 2x
-        anchorDF[id+1, :y] += 2y
-        anchorDF[id+1, :z] += 2z
+        # so all the reported values are half what they should be. We also
+        # divide by 1000 to convert mm to m
+        anchorDF[id+1, :x] += 2x / 1000
+        anchorDF[id+1, :y] += 2y / 1000
+        anchorDF[id+1, :z] += 2z / 1000
         counts[id+1] += 1
     end
 
@@ -358,16 +391,40 @@ function getanchorlocations(rangefile, locationfile)
     anchorDF[:y][3:4] = anchorDF[:y][3:4] ./ counts[3:4]
     anchorDF[:z][3:4] = anchorDF[:z][3:4] ./ counts[3:4]
 
-    x2 = anchorDF[:x][3]
-    y2 = anchorDF[:y][3]
-    z2 = anchorDF[:z][3]
-
     ranges = readtable(rangefile)
     r20 = mean(dropna(ranges[:r20]))
     r21 = mean(dropna(ranges[:r21]))
     r30 = mean(dropna(ranges[:r30]))
     r31 = mean(dropna(ranges[:r31]))
 
-    α = r30^2 - r20^2 + x2^2
+    # we start out considering anchor 3 (index 4) to be the origin
+    a0 = trilaterate(
+        [anchorDF[4, :x], anchorDF[4, :z]],
+        [anchorDF[3, :x], anchorDF[3, :z]],
+        r30, r20)
+    @assert size(a0) == (2, 2)
+    a1 = trilaterate(
+        [anchorDF[4, :x], anchorDF[4, :z]],
+        [anchorDF[3, :x], anchorDF[3, :z]],
+        r31, r21)
+    @assert size(a1) == (2, 2)
+
+    # we should get 2 solutions and we happend to know that the correct one is
+    # in front of (more positive Z) a3 and a2
+    for i in 1:2
+        if a0[2, i] > anchorDF[4, :z]
+            anchorDF[1, :x] = a0[1, i]
+            anchorDF[1, :y] = anchorDF[4, :y]
+            anchorDF[1, :z] = a0[2, i]
+        end
+        if a1[2, i] > anchorDF[3, :z]
+            anchorDF[2, :x] = a1[1, i]
+            anchorDF[2, :y] = anchorDF[3, :y]
+            anchorDF[2, :z] = a1[2, i]
+        end
+    end
+
+    anchorDF
+end
 
 end # module
