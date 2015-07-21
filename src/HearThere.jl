@@ -334,7 +334,18 @@ function parseoptitrack(filename)
         end
     end
     # The OptiTrack reports a location of 0, 0, 0 if the trackable isn't present
-    @where df ((:x .!= 0) | (:y .!= 0) | (:z .!= 0))
+    @byrow df begin
+        if :x == 0.0 && :y == 0.0 && :z == 0.0
+            :x = NA
+            :y = NA
+            :z = NA
+            :q0 = NA
+            :q1 = NA
+            :q2 = NA
+            :q3 = NA
+        end
+    end
+    df
 end
 
 """
@@ -367,6 +378,13 @@ function trilaterate(a1, a2, r1, r2)
     end
     # now re-apply the offset. Note this will broadcast in the 2x2 case
     sol .+ a1
+end
+
+function cleanranges(ranges)
+    for anc in [:anchor0, :anchor1, :anchor2, :anchor3]
+        ranges[ranges[anc] .== -1.0, anc] = NA
+    end
+    nothing
 end
 
 function getanchorlocations(rangefile, locationfile)
@@ -427,6 +445,108 @@ function getanchorlocations(rangefile, locationfile)
     end
 
     anchorDF
+end
+
+
+"""
+Takes a dataframe of (possibly irregularly) timestamped data and resamples to the given resolution as
+if the data had been sampled at a regular interval. Returns an array
+of the resampled data. This assumes the data is sorted by timestamp and timestamp.
+is in seconds.
+"""
+function samplereg(data::DataFrame, resolution::FloatingPoint, timefield=:timestamp)
+    colnames = filter(n -> n != timefield, names(data))
+    endidx = length(data[timefield])
+    out = DataFrame()
+    out[timefield] = data[timefield][1]:resolution:data[timefield][endidx]
+    n = length(out[timefield])
+    for name in colnames
+        out[name] = Array(Float64, n)
+    end
+
+    # set up the current interval start/end times
+    intstart = data[timefield][1]
+    intend = data[timefield][2]
+
+    idx = 1 # input index
+    odx = 1 # output index
+    while odx <= n
+        sampletime = out[odx, timefield]
+        # find the data timestamps that bracket our current sample time
+        while sampletime > intend
+            idx += 1
+            intstart = intend
+            intend = data[timefield][idx+1]
+        end
+        α = (sampletime - intstart) / (intend - intstart)
+        for name in colnames
+            out[odx, name] = (1-α) * data[idx, name] + α * data[idx+1, name]
+        end
+        odx += 1
+    end
+    out
+end
+
+"""
+returns the lag (in samples) that vector a needs to be delayed relative to
+vector b to maximize their cross-correlation, or alternatively the number of
+sample of vector b that need to be removed to align the vectors. Assumes the
+vectors are at the same sample rate.
+"""
+function getlag(a, b)
+    xc = xcorr(a - mean(a), b - mean(b))
+    _, i = findmax(xc)
+
+    max(length(a), length(b)) - i
+end
+
+"""
+Takes two DataFrames at the same sample rate and returns new ones that are
+time-aligned and the same length. The intersection of the column names
+excluding the time field are used for the cross-correlation.
+"""
+function align(a, b, timefield=:timestamp)
+    acolnames = filter(n -> n != timefield, names(a))
+    bcolnames = filter(n -> n != timefield, names(b))
+    colnames = intersect(acolnames, bcolnames)
+
+
+    lagsum = 0
+    for colname in colnames
+        lagsum += getlag(convert(Array, a[colname], 0.0), convert(Array, b[colname], 0.0))
+    end
+    avglag = int(round(lagsum / length(colnames)))
+    if avglag >= 0
+        # b needs to be trimmed at the beginning
+        bstart = avglag + 1
+        astart = 1
+    else
+        # a needs to be trimmed at the beginning
+        astart = avglag + 1
+        bstart = 1
+    end
+
+    n = min(size(a[astart:end, :], 1), size(b[bstart:end, :], 1))
+    println(n)
+
+    (a[astart:astart+n-1, :], b[bstart:bstart+n-1, :])
+end
+
+
+"""
+Takes 2 dataframes and returns a new dataframe with the errors between
+matching columns
+"""
+function geterr(a, b, timefield=:timestamp)
+    acolnames = filter(n -> n != timefield, names(a))
+    bcolnames = filter(n -> n != timefield, names(b))
+    colnames = intersect(acolnames, bcolnames)
+
+    errdf = DataFrame()
+    for colname in colnames
+        errdf[colname] = a[colname] - b[colname]
+    end
+    errdf
 end
 
 end # module
