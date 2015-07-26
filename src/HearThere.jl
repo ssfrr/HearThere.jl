@@ -8,8 +8,10 @@ using PyPlot
 using Quaternions
 using LightXML
 using DataFramesMeta
+using Compat
 
 export getrawdata, getcookeddata
+
 
 # full-scale range in g's (based on 16-bit signed ADC word)
 const accelFSR = 16
@@ -141,7 +143,10 @@ function rotate(q::Quaternion, v::Vector)
 end
 
 function plotpath(data)
-    PyPlot.plot3D(data[:x], data[:y], data[:z])
+    PyPlot.plot3D(convert(Array, data[:x], NaN),
+        convert(Array, data[:y], NaN),
+        convert(Array, data[:z], NaN),
+        alpha=0.5)
     xlabel("x")
     ylabel("y")
     zlabel("z")
@@ -349,6 +354,20 @@ function parseoptitrack(filename)
 end
 
 """
+Calculate the ranges for the given path (with x, y, z columns) and add them
+to the dataframe
+"""
+function addranges!(optipath, anchors)
+    for (anc, i) in [(:anchor0, 1), (:anchor1, 2), (:anchor2, 3), (:anchor3, 4)]
+        optipath[anc] = sqrt(
+            (anchors[:x][i] - optipath[:x]).^2 +
+            (anchors[:y][i] - optipath[:y]).^2 +
+            (anchors[:z][i] - optipath[:z]).^2)
+    end
+    optipath
+end
+
+"""
 Takes 2 points (a1 and a2) and two ranges to those points (r1 and r2) and finds
 the 0, 1 or 2 points that satisfy the ranges. The are returned as a 2xN matrix,
 where N is the number of solutions.
@@ -384,7 +403,7 @@ function cleanranges(ranges)
     for anc in [:anchor0, :anchor1, :anchor2, :anchor3]
         ranges[ranges[anc] .== -1.0, anc] = NA
     end
-    nothing
+    ranges
 end
 
 function getanchorlocations(rangefile, locationfile)
@@ -527,9 +546,52 @@ function align(a, b, timefield=:timestamp)
     end
 
     n = min(size(a[astart:end, :], 1), size(b[bstart:end, :], 1))
-    println(n)
 
     (a[astart:astart+n-1, :], b[bstart:bstart+n-1, :])
+end
+
+df1 = DataFrame(x=[1, 2, 3, 4], y=[5, 6, 7, 8])
+df2 = DataFrame(x=[2, 4, 6, 8], z=[5, 6, 7, 8])
+
+df = vcat(df1, df2)
+
+
+function combine_range_calib{T <: Real, S <: String}(distances::Array{T}, measurementfiles::Array{S}, undobias=false)
+    # these are the horizontal offsets of the anchors during calibration in meters
+    offsets = @compat Dict(
+        :anchor0 => -0.165,
+        :anchor1 => -0.055,
+        :anchor2 => 0.055,
+        :anchor3 => 0.165
+    )
+    df = DataFrame(
+        timestamp=Float64[],
+        anchor=String[],
+        actual=Float64[],
+        measured=Float64[]
+    )
+    for (r, f) in zip(distances, measurementfiles)
+        measuredf = readtable(f)
+        for anc in [:anchor0, :anchor1, :anchor2, :anchor3]
+            actual = sqrt(offsets[anc]^2 + r^2)
+            anchordf = DataFrame(
+                timestamp=measuredf[:timestamp],
+                anchor=string(anc),
+                actual=ones(size(measuredf, 1)) * actual,
+                measured=measuredf[anc]
+            )
+            @byrow anchordf begin
+                if :measured == -1.0 || :measured > 1000
+                    :measured = NA
+                elseif biased
+                    :measured = reversebias(:measured)
+                end
+            end
+            df = vcat(df, anchordf)
+        end
+    end
+
+    df
 end
 
 
@@ -547,6 +609,39 @@ function geterr(a, b, timefield=:timestamp)
         errdf[colname] = a[colname] - b[colname]
     end
     errdf
+end
+
+# this is ported over from the decawave code and is used to correct the range
+# measurements
+function getrangebias(range)
+    # bias table from the decawave driver, used in the tag code to correct the distance
+    biastable = [ 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 15, 18, 20, 22, 24, 27,
+                  29, 32, 35, 38, 41, 44, 47, 51, 55, 58, 62, 66, 71, 78, 85,
+                  96, 111, 135, 194, 240, 255 ]
+    biasoff = -23
+
+    range25 = range * 4 # in units of 25cm
+    if range25 > 255
+        range25 = 255
+    end
+
+    i = 1
+    while range25 > biastable[i]
+        i += 1
+    end
+    bias = i - 1 + biasoff # bias is in cm
+    bias * 0.01 # convert to m
+end
+
+function adjustrange(range)
+    range - getrangebias(range)
+end
+
+"""
+Try to reverse the bias applied in the tag. This can have an error of 1cm
+"""
+function reversebias(range)
+    range + getrangebias(range)
 end
 
 end # module
