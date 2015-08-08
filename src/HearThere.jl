@@ -130,9 +130,10 @@ function getcookeddata(duration::Real, oscport::Integer=10001)
                 push!(rangedf, [now, msg[1], msg[2], msg[3], msg[4]])
             end
         end
-    finally
-        close(sock)
+    catch InterruptException
+        println("Interrupted.")
     end
+    close(sock)
     (rangedf, orientationdf)
 end
 
