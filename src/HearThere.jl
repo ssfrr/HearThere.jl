@@ -78,6 +78,75 @@ end
 """
 Listen on the given port for OSC messages of the form:
 
+    /body_orientation ihffff id timestamp q1 q2 q3 q0
+    /body_location  ihfff id timestamp x y z
+and
+    /ranges ffff anchor0 anchor1 anchor2 anchor3
+
+and return a tuple of DataFrames of the timestamped values.
+"""
+function getoptidata(duration::Real, oscport::Integer=10001)
+    orientationpath = "/body_orientation"
+    locationpath = "/body_location"
+    orientationdf = DataFrame(
+        id=Int32[],
+        timestamp=Float64[],
+        q0=Float32[],
+        q1=Float32[],
+        q2=Float32[],
+        q3=Float32[])
+    locationdf = DataFrame(
+        id=Int32[],
+        timestamp=Float64[],
+        x=Float32[],
+        y=Float32[],
+        z=Float32[])
+    sock = UdpSocket()
+    if !bind(sock, ip"0.0.0.0", oscport)
+        println("Couldn't bind to port $oscport")
+        return (locationdf, orientationdf)
+    end
+    try
+        # wait for the first message
+        println("Waiting for first message...")
+        while true
+            msg = OscMsg(recv(sock))
+            if path(msg) in [orientationpath, locationpath]
+                break
+            else
+                println("got unrecognized path: $(path(msg))")
+            end
+        end
+        println("Capturing Data...")
+        starttime = time()
+        now = time()
+        lastreported = 0
+        while(now < starttime + duration)
+            if(now - lastreported >= 5)
+                println("$(round(starttime + duration - now)) seconds left")
+                lastreported = now
+            end
+            msg = OscMsg(recv(sock))
+            now = time()
+            # opti-track data has an inverted z, so we need to convert
+            if path(msg) == orientationpath
+                push!(orientationdf, [msg[1], now, msg[6], -msg[3], -msg[4], msg[5]])
+            elseif path(msg) == locationpath
+                push!(locationdf, [msg[1], now, msg[3], msg[4], -msg[5]])
+            else
+                println("Got unrecognized path $(path(msg))")
+            end
+        end
+    catch InterruptException
+        println("Interrupted.")
+    end
+    close(sock)
+    (locationdf, orientationdf)
+end
+
+"""
+Listen on the given port for OSC messages of the form:
+
     /orientation ffff q0 q1 q2 q3
 and
     /ranges ffff anchor0 anchor1 anchor2 anchor3
@@ -316,6 +385,8 @@ function parseoptitrack(filename)
         bodydataElement = find_element(dfElement, "RigidBodyData")
         # the rigid body properties aren't contained inside an XML tag, they're all
         # just repeated, so we iterate through the zipped list
+        # we're also switching qz and qy as described here:
+        # https://forums.naturalpoint.com/viewtopic.php?p=42839
         for (id, x, y, z, q0, q1, q2, q3) in zip(
                 get_elements_by_tagname(bodydataElement, "RigidBodyID"),
                 get_elements_by_tagname(bodydataElement, "x"),
@@ -323,8 +394,8 @@ function parseoptitrack(filename)
                 get_elements_by_tagname(bodydataElement, "z"),
                 get_elements_by_tagname(bodydataElement, "qw"),
                 get_elements_by_tagname(bodydataElement, "qx"),
-                get_elements_by_tagname(bodydataElement, "qy"),
-                get_elements_by_tagname(bodydataElement, "qz"))
+                get_elements_by_tagname(bodydataElement, "qz"),
+                get_elements_by_tagname(bodydataElement, "qy"))
             # the optitrack data is 1/2 what it should be because of a calibration
             # error. Also the Z-axis is reversed
             push!(df, [
@@ -336,7 +407,7 @@ function parseoptitrack(filename)
                 float(content(q0)),
                 float(content(q1)),
                 float(content(q2)),
-                float(content(q3))])
+                -float(content(q3))])
         end
     end
     # The OptiTrack reports a location of 0, 0, 0 if the trackable isn't present
@@ -484,6 +555,18 @@ function samplereg(data::DataFrame, resolution::FloatingPoint, timefield=:timest
         out[name] = Array(Float64, n)
     end
 
+    quat = false
+    quatcols = [:q0, :q1, :q2, :q3]
+    # we treat quaternions columns specially if present
+    if all([col in colnames for col in quatcols])
+        quat = true
+        # remove the quaternions columns from the regular list
+        colnames = filter(n -> !(n in quatcols), colnames)
+        for col in quatcols
+            out[col] = Array(Float64, n)
+        end
+    end
+
     # set up the current interval start/end times
     intstart = data[timefield][1]
     intend = data[timefield][2]
@@ -498,14 +581,43 @@ function samplereg(data::DataFrame, resolution::FloatingPoint, timefield=:timest
             intstart = intend
             intend = data[timefield][idx+1]
         end
-        α = (sampletime - intstart) / (intend - intstart)
+        if intend == intstart
+            α = 0.0
+        else
+            α = (sampletime - intstart) / (intend - intstart)
+        end
         for name in colnames
-            out[odx, name] = (1-α) * data[idx, name] + α * data[idx+1, name]
+            if isna(data[idx, name]) || isna(data[idx+1, name])
+                out[odx, name] = NA
+            else
+                out[odx, name] = lerp(data[idx, name], data[idx+1, name], α)
+            end
+        end
+        if quat
+            if any([isna(data[idx+off, c]) for off in [0, 1], c in quatcols])
+                for col in quatcols
+                    out[odx, col] = NA
+                end
+            else
+                p = Quaternion([data[idx, col] for col in quatcols]...)
+                q = Quaternion([data[idx+1, col] for col in quatcols]...)
+                lerped = nlerp(p, q, α)
+                out[odx, :q0] = lerped.s
+                out[odx, :q1] = lerped.v1
+                out[odx, :q2] = lerped.v2
+                out[odx, :q3] = lerped.v3
+            end
         end
         odx += 1
     end
     out
 end
+
+Quaternion([1, 0, 0, 0]...)
+# HearThere.lerp(10, 15, 1)
+# p = Quaternion(1, 0, 0, 0.0)
+# q = Quaternion(0, 1, 0, 0.0)
+# HearThere.nlerp(p, q, 0.99)
 
 """
 returns the lag (in samples) that vector a needs to be delayed relative to
@@ -523,32 +635,44 @@ end
 """
 Takes two DataFrames at the same sample rate and returns new ones that are
 time-aligned and the same length. The intersection of the column names
-excluding the time field are used for the cross-correlation.
+excluding the time field are used for the cross-correlation if no offset
+is given.
 """
-function align(a, b, timefield=:timestamp)
-    acolnames = filter(n -> n != timefield, names(a))
-    bcolnames = filter(n -> n != timefield, names(b))
-    colnames = intersect(acolnames, bcolnames)
+function align(a, b; offset=nothing, timefield=:timestamp)
+    if offset == nothing
+        acolnames = filter(n -> n != timefield, names(a))
+        bcolnames = filter(n -> n != timefield, names(b))
+        colnames = intersect(acolnames, bcolnames)
 
-
-    lagsum = 0
-    for colname in colnames
-        lagsum += getlag(convert(Array, a[colname], 0.0), convert(Array, b[colname], 0.0))
+        lagsum = 0
+        for colname in colnames
+            lagsum += getlag(convert(Array, a[colname], 0.0), convert(Array, b[colname], 0.0))
+        end
+        avglag = int(round(lagsum / length(colnames)))
+    else
+        avglag = offset
     end
-    avglag = int(round(lagsum / length(colnames)))
     if avglag >= 0
         # b needs to be trimmed at the beginning
         bstart = avglag + 1
         astart = 1
     else
+        println("WARNING: negative lag ($avglag) untested")
         # a needs to be trimmed at the beginning
-        astart = avglag + 1
+        astart = -avglag + 1
         bstart = 1
     end
 
     n = min(size(a[astart:end, :], 1), size(b[bstart:end, :], 1))
 
-    (a[astart:astart+n-1, :], b[bstart:bstart+n-1, :])
+    a = a[astart:astart+n-1, :]
+    b = b[bstart:bstart+n-1, :]
+
+    # we don't know what the correct times are anyways, so align them starting
+    # at zero
+    a[timefield] -= a[1, timefield]
+    b[timefield] = a[timefield]
+    (a, b)
 end
 
 df1 = DataFrame(x=[1, 2, 3, 4], y=[5, 6, 7, 8])
@@ -557,7 +681,10 @@ df2 = DataFrame(x=[2, 4, 6, 8], z=[5, 6, 7, 8])
 df = vcat(df1, df2)
 
 
-function combine_range_calib{T <: Real, S <: String}(distances::Array{T}, measurementfiles::Array{S}, undobias=false)
+function combine_range_calib{T <: Real, S <: String}(
+    distances::Array{T},
+    measurementfiles::Array{S},
+    undobias=false)
     # these are the horizontal offsets of the anchors during calibration in meters
     offsets = @compat Dict(
         :anchor0 => -0.165,
@@ -584,7 +711,8 @@ function combine_range_calib{T <: Real, S <: String}(distances::Array{T}, measur
             @byrow anchordf begin
                 if :measured == -1.0 || :measured > 1000
                     :measured = NA
-                elseif biased
+                elseif undobias
+                    # reverse the bias that the headtracker is doing internally
                     :measured = reversebias(:measured)
                 end
             end
@@ -643,6 +771,97 @@ Try to reverse the bias applied in the tag. This can have an error of 1cm
 """
 function reversebias(range)
     range + getrangebias(range)
+end
+
+"""
+Convert a quaternion to the Aerospace Euler Angle representation (Z-Y'-X'').
+This representation considers X to be forward (towards the nose), Y is to the
+right, and Z is down. This sequence is also known as Yaw-Pitch-Roll. Note that
+the primes indicate that the rotations are about the object's local coordinate
+system, which is transformed at each step. In the global coordinate system
+the same rotation is achieved by rotating in the reverse order, X-Y-Z. Also
+note that rotations follow the right-hand rule.
+
+See Kuipers "Quaternions and Rotation Sequences" (1999) for more info.
+"""
+function aerospace(q::Quaternion)
+    # TODO: handle gimbal lock situations
+    q = normalize(q)
+    # test = 2(q.v1*q.v3+q.s*q.v2)
+    test = 2(-q.v1*q.v3+q.s*q.v2)
+    if test > 0.998
+        ϕ = 0;
+        θ = pi/2
+        ψ = 2 * atan2(q.v1, q.s);
+    elseif test < -0.998
+        ϕ = 0;
+        θ = -pi/2
+        ψ = -2 * atan2(q.v1, q.s);
+    else
+        ϕ = -atan2(2(q.s*q.v1 + q.v2*q.v3), 1 - 2(q.v1^2+q.v2^2))
+        θ = asin(2(q.s*q.v2 - q.v3*q.v1))
+        ψ = -atan2(2(q.s*q.v3 + q.v1*q.v2), 1 - 2(q.v2^2+q.v3^2))
+    end
+
+    # yaw, pitch, roll
+    (ψ, θ, ϕ)
+end
+
+function addaerospace!(df::DataFrame)
+    yaw = DataArray(Float64, 0)
+    pitch = DataArray(Float64, 0)
+    roll = DataArray(Float64, 0)
+    for i in 1:size(df, 1)
+        # convert to aerospace axis convention
+        q0 = df[i, :q0]
+        q1 = -df[i, :q3]
+        q2 = -df[i, :q1]
+        q3 = df[i, :q2]
+
+        if isna(q0) || isna(q1) || isna(q2) || !isna(q3)
+            y = NA
+            p = NA
+            r = NA
+        else
+            y, p, r = aerospace(Quaternion(q0, q1, q2, q3, true))
+        end
+        push!(yaw, y)
+        push!(pitch, p)
+        push!(roll, r)
+    end
+    df[:yaw] = yaw
+    df[:pitch] = pitch
+    df[:roll] = roll
+
+    nothing
+end
+
+"""
+Linearly interpolate between two values.
+"""
+lerp(lhs, rhs, t::Real) = (1-t)*lhs + t*rhs
+
+
+"""
+Interpolate between two quaternions by linearly interpolating their
+components and ensuring it's still a valid rotation by normalizing. This is
+still guaranteed to be on the great-circle path between the two quaternions,
+(like slerp), but will not travel at a constant rotational velocity with respect
+to t.
+"""
+function nlerp(p::Quaternion, q::Quaternion, t::Real)
+    if p.s*q.s + p.v1*q.v1 + p.v2*q.v2 + p.v3*q.v3 < 0
+        # negating the quaternion doesn't change the rotation it represents
+        # but this ensures we take the short way around instead of the long way
+        q = -q
+    end
+    res = Quaternion(
+        lerp(p.s, q.s, t),
+        lerp(p.v1, q.v1, t),
+        lerp(p.v2, q.v2, t),
+        lerp(p.v3, q.v3, t))
+
+    normalize(res)
 end
 
 end # module
