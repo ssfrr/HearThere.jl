@@ -147,39 +147,70 @@ end
 """
 Listen on the given port for OSC messages of the form:
 
-    /orientation ffff q0 q1 q2 q3
-and
-    /ranges ffff anchor0 anchor1 anchor2 anchor3
+    /orientation    ffff    q0 q1 q2 q3
+    /ranges         ffff     anchor0 anchor1 anchor2 anchor3
+    /gpsgeo         ddddd   latitude longitude acceleration horiz_accuracy, vert_accuracy
+    /gpsxyz         fff     x y z
+    /uwblocalxyz    ffffff  x y z std_x std_y std_z
+    /uwbglobalxyz   ffff    x y z confidence
+    /fusedxyz       fff     x y z
 
-and return a tuple of DataFrames of the timestamped values.
+and return a dictionary of DataFrames of the timestamped values.
 """
-function getcookeddata(duration::Real, oscport::Integer=10001)
-    orientationpath = "/orientation"
-    rangepath = "/ranges"
-    rangedf = DataFrame(
-        timestamp=Float64[],
-        anchor0=Float32[],
-        anchor1=Float32[],
-        anchor2=Float32[],
-        anchor3=Float32[])
-    orientationdf = DataFrame(
-        timestamp=Float64[],
-        q0=Float32[],
-        q1=Float32[],
-        q2=Float32[],
-        q3=Float32[])
+function getcookeddata(duration::Real, fileprefix::String, oscport::Integer=10001)
+    dfs = [
+        "/orientation" => DataFrame(
+            timestamp=Float64[],
+            q0=Float32[], q1=Float32[], q2=Float32[], q3=Float32[]),
+        "/ranges" => DataFrame(
+            timestamp=Float64[],
+            anchor0=Float32[], anchor1=Float32[], anchor2=Float32[], anchor3=Float32[]),
+        "/gpsgeo" => DataFrame(
+            timestamp=Float64[],
+            latitude=Float64[], longitude=Float64[], elevation=Float64[],
+            horizAccuracy=Float32[],
+            vertAccuracy=Float32[]),
+        "/gpsxyz" => DataFrame(
+            timestamp=Float64[],
+            x=Float32[], y=Float32[], z=Float32[]),
+        "/uwblocalxyz" => DataFrame(
+            timestamp=Float64[],
+            x=Float32[], y=Float32[], z=Float32[],
+            stdX=Float32[], stdY=Float32[], stdZ=Float32[]),
+        "/uwbglobalxyz" => DataFrame(
+            timestamp=Float64[],
+            x=Float32[], y=Float32[], z=Float32[],
+            confidence=Float32[]),
+        "/fusedxyz" => DataFrame(
+            timestamp=Float64[],
+            x=Float32[], y=Float32[], z=Float32[])
+        ]
+
+    # returns the filled-in dataframes
+    collect_data(dfs, duration, oscport)
+
+    for metric in keys(dfs)
+        writetable("$(fileprefix)_$(metric[2:end]).tsv", dfs[metric])
+    end
+
+    dfs
+end
+
+function collect_data{T<:String}(dfs::Dict{T, DataFrame}, duration, oscport)
     sock = UdpSocket()
     if !bind(sock, ip"0.0.0.0", oscport)
         println("Couldn't bind to port $oscport")
-        return (rangedf, orientationdf)
+        return dfs
     end
     try
         # wait for the first message
         println("Waiting for first message...")
         while true
             msg = OscMsg(recv(sock))
-            if path(msg) in [orientationpath, rangepath]
+            if path(msg) in keys(dfs)
                 break
+            else
+                println("Got unrecognized message path \"$(path(msg))\"")
             end
         end
         println("Capturing Data...")
@@ -193,17 +224,28 @@ function getcookeddata(duration::Real, oscport::Integer=10001)
             end
             msg = OscMsg(recv(sock))
             now = time()
-            if path(msg) == orientationpath
-                push!(orientationdf, [now, msg[1], msg[2], msg[3], msg[4]])
-            elseif path(msg) == rangepath
-                push!(rangedf, [now, msg[1], msg[2], msg[3], msg[4]])
+            msgPath = path(msg)
+            df = DataFrame()
+            try
+                df = dfs[msgPath]
+            catch e
+                isa(e, KeyError) || rethrow(e)
+                println("Got unrecognized message path \"$(path(msg))\"")
+                continue
             end
+
+            args = [msg[i] for i in 1:(size(df, 2)-1)]
+            row = [now, args...]
+            push!(df, [now, args...])
         end
-    catch InterruptException
+    catch e
+        isa(e, InterruptException) || rethrow(e)
         println("Interrupted.")
+    finally
+        close(sock)
     end
-    close(sock)
-    (rangedf, orientationdf)
+
+    dfs
 end
 
 function rotate(q::Quaternion, v::Vector)
@@ -675,11 +717,6 @@ function align(a, b; offset=nothing, timefield=:timestamp)
     (a, b)
 end
 
-df1 = DataFrame(x=[1, 2, 3, 4], y=[5, 6, 7, 8])
-df2 = DataFrame(x=[2, 4, 6, 8], z=[5, 6, 7, 8])
-
-df = vcat(df1, df2)
-
 
 function combine_range_calib{T <: Real, S <: String}(
     distances::Array{T},
@@ -818,7 +855,7 @@ function addaerospace!(df::DataFrame)
         q2 = -df[i, :q1]
         q3 = df[i, :q2]
 
-        if isna(q0) || isna(q1) || isna(q2) || !isna(q3)
+        if isna(q0) || isna(q1) || isna(q2) || isna(q3)
             y = NA
             p = NA
             r = NA
@@ -841,6 +878,10 @@ Linearly interpolate between two values.
 """
 lerp(lhs, rhs, t::Real) = (1-t)*lhs + t*rhs
 
+"""
+Dot product of two quaternions, as if they're vectors in 4D
+"""
+dot(p::Quaternion, q::Quaternion) = p.s*q.s + p.v1*q.v1 + p.v2*q.v2 + p.v3*q.v3
 
 """
 Interpolate between two quaternions by linearly interpolating their
@@ -850,7 +891,7 @@ still guaranteed to be on the great-circle path between the two quaternions,
 to t.
 """
 function nlerp(p::Quaternion, q::Quaternion, t::Real)
-    if p.s*q.s + p.v1*q.v1 + p.v2*q.v2 + p.v3*q.v3 < 0
+    if dot(p, q) < 0
         # negating the quaternion doesn't change the rotation it represents
         # but this ensures we take the short way around instead of the long way
         q = -q
@@ -862,6 +903,36 @@ function nlerp(p::Quaternion, q::Quaternion, t::Real)
         lerp(p.v3, q.v3, t))
 
     normalize(res)
+end
+
+
+"""
+Calculates the error between two unit quaternions representing rotations.
+Uses metric Φ6 from Huynh's "Metrics for 3D Rotations: Comparison and Analysis",
+which has units of radians.
+"""
+err(p::Quaternion, q::Quaternion) = 2acos(abs(dot(p, q)))
+
+"""
+Calculates the quaternion error for the given dataframes. Assumes they're the
+same length
+"""
+function err(df1::DataFrame, df2::DataFrame)
+    @assert(size(df1, 1) == size(df2, 1))
+    len = size(df1, 1)
+    er = DataFrame(timestamp=Array(Float64, len), err=Array(Float64, len))
+    quatcols = [:q0, :q1, :q2, :q3]
+    for i in 1:len
+        er[i, :timestamp] = df1[i, :timestamp]
+        if any(Bool[isna(df[i, col]) for df in DataFrame[df1, df2], col in quatcols])
+            er[i, :err] = NA
+        else
+            p = Quaternion([df1[i, col] for col in quatcols]...)
+            q = Quaternion([df2[i, col] for col in quatcols]...)
+            er[i, :err] = err(p, q)
+        end
+    end
+    er
 end
 
 end # module
