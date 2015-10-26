@@ -157,8 +157,8 @@ Listen on the given port for OSC messages of the form:
 
 and return a dictionary of DataFrames of the timestamped values.
 """
-function getcookeddata(duration::Real, fileprefix::String, oscport::Integer=10001)
-    dfs = [
+function getcookeddata(duration::Real, fileprefix::AbstractString, oscport::Integer=10001)
+    dfs = @compat Dict{UTF8String, Any}(
         "/orientation" => DataFrame(
             timestamp=Float64[],
             q0=Float32[], q1=Float32[], q2=Float32[], q3=Float32[]),
@@ -184,7 +184,7 @@ function getcookeddata(duration::Real, fileprefix::String, oscport::Integer=1000
         "/fusedxyz" => DataFrame(
             timestamp=Float64[],
             x=Float32[], y=Float32[], z=Float32[])
-        ]
+        )
 
     # returns the filled-in dataframes
     collect_data(dfs, duration, oscport)
@@ -196,7 +196,7 @@ function getcookeddata(duration::Real, fileprefix::String, oscport::Integer=1000
     dfs
 end
 
-function collect_data{T<:String}(dfs::Dict{T, DataFrame}, duration, oscport)
+function collect_data{T<:AbstractString}(dfs::Dict{T, DataFrame}, duration, oscport)
     sock = UdpSocket()
     if !bind(sock, ip"0.0.0.0", oscport)
         println("Couldn't bind to port $oscport")
@@ -401,7 +401,7 @@ function makerawdf(timestamps, data)
 end
 
 function parseoptitrack(filename)
-    bodies = Dict{Int, String}()
+    bodies = Dict{Int, AbstractString}()
     rootElement = root(parse_file(filename))
     for bodyDesc in get_elements_by_tagname(rootElement, "RigidBodyDesc")
         name = content(find_element(bodyDesc, "Name"))
@@ -453,7 +453,7 @@ function parseoptitrack(filename)
         end
     end
     # The OptiTrack reports a location of 0, 0, 0 if the trackable isn't present
-    @byrow df begin
+    @byrow! df begin
         if :x == 0.0 && :y == 0.0 && :z == 0.0
             :x = NA
             :y = NA
@@ -587,7 +587,7 @@ if the data had been sampled at a regular interval. Returns an array
 of the resampled data. This assumes the data is sorted by timestamp and timestamp.
 is in seconds.
 """
-function samplereg(data::DataFrame, resolution::FloatingPoint, timefield=:timestamp)
+function samplereg(data::DataFrame, resolution::AbstractFloat, timefield=:timestamp)
     colnames = filter(n -> n != timefield, names(data))
     endidx = length(data[timefield])
     out = DataFrame()
@@ -718,7 +718,7 @@ function align(a, b; offset=nothing, timefield=:timestamp)
 end
 
 
-function combine_range_calib{T <: Real, S <: String}(
+function combine_range_calib{T <: Real, S <: AbstractString}(
     distances::Array{T},
     measurementfiles::Array{S},
     undobias=false)
@@ -731,7 +731,7 @@ function combine_range_calib{T <: Real, S <: String}(
     )
     df = DataFrame(
         timestamp=Float64[],
-        anchor=String[],
+        anchor=UTF8String[],
         actual=Float64[],
         measured=Float64[]
     )
@@ -745,7 +745,7 @@ function combine_range_calib{T <: Real, S <: String}(
                 actual=ones(size(measuredf, 1)) * actual,
                 measured=measuredf[anc]
             )
-            @byrow anchordf begin
+            @byrow! anchordf begin
                 if :measured == -1.0 || :measured > 1000
                     :measured = NA
                 elseif undobias
